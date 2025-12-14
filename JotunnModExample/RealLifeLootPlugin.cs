@@ -145,16 +145,33 @@ namespace RealLifeLootMod
         private void DumpItemDatabase()
         {
             Logger.LogInfo("Dumping item database...");
+
+            // 1. Define the Whitelist
+            // We only include items that match these specific types
+            var allowedTypes = new HashSet<ItemDrop.ItemData.ItemType>
+    {
+        ItemDrop.ItemData.ItemType.Material,
+        ItemDrop.ItemData.ItemType.Consumable,
+        ItemDrop.ItemData.ItemType.Ammo,
+        ItemDrop.ItemData.ItemType.Trophy // Note: Valheim devs spell it 'Trophie' in the code!
+    };
+
             var exportList = new List<ItemExport>();
 
             foreach (GameObject itemPrefab in ObjectDB.instance.m_items)
             {
                 var itemDrop = itemPrefab.GetComponent<ItemDrop>();
-                if (itemDrop != null)
+
+                // 2. The Filter Check
+                // If it's not null AND it's in our allowed list...
+                if (itemDrop != null && allowedTypes.Contains(itemDrop.m_itemData.m_shared.m_itemType))
                 {
-                    // Clean up the name (handles localization if loaded)
                     string rawName = itemDrop.m_itemData.m_shared.m_name;
                     string localizedName = Localization.instance.Localize(rawName);
+
+                    // Skip items with broken/empty names (often internal test items)
+                    if (string.IsNullOrEmpty(localizedName) || localizedName.StartsWith("$"))
+                        continue;
 
                     exportList.Add(new ItemExport
                     {
@@ -165,7 +182,9 @@ namespace RealLifeLootMod
                 }
             }
 
-            // Simple JSON creation to avoid extra dependencies
+            // Sort the list alphabetically by name to make it nicer to read
+            exportList = exportList.OrderBy(x => x.name).ToList();
+
             var jsonLines = exportList.Select(i =>
                 $"\t{{ \"name\": \"{i.name}\", \"prefab\": \"{i.prefab}\", \"category\": \"{i.category}\" }}");
 
@@ -176,20 +195,19 @@ namespace RealLifeLootMod
 
             Logger.LogInfo($"Database dumped to: {path}");
 
-            // Notify the player (in case they are already spawned in)
             if (Player.m_localPlayer != null)
             {
-                Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Item Database Dumped!");
+                Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Item Database Dumped (Filtered)!");
             }
         }
-    }
 
-    // 5. HELPER CLASS FOR JSON
-    [Serializable]
-    public class ItemExport
-    {
-        public string name;      // The human readable name (e.g., "Wood")
-        public string prefab;    // The code name (e.g., "Wood")
-        public string category;  // Weapon, Material, Consumable, etc.
+        // 5. HELPER CLASS FOR JSON
+        [Serializable]
+        public class ItemExport
+        {
+            public string name;      // The human readable name (e.g., "Wood")
+            public string prefab;    // The code name (e.g., "Wood")
+            public string category;  // Weapon, Material, Consumable, etc.
+        }
     }
 }
