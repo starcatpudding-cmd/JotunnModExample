@@ -1,8 +1,12 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.Net; // Fixes HttpListener
+using System.Collections.Generic; // Added for List<>
+using System.IO;                  // Added for File writing
+using System.Linq;                // Added for JSON formatting
+using System.Net;
 using System.Threading;
 using BepInEx;
+using BepInEx.Configuration;
 using UnityEngine;
 
 namespace RealLifeLootMod
@@ -15,18 +19,36 @@ namespace RealLifeLootMod
         private HttpListener _listener;
         private Thread _serverThread;
         private bool _isRunning = true;
-        private const int PORT = 4444;
+
+        // Flag to ensure we only dump the database once
+        private bool _hasDumped = false;
+
+        private ConfigEntry<int> _serverPort;
 
         void Awake()
         {
-            Logger.LogInfo("Real Life Loot Mod Started!");
+            // 1. INITIALIZE CONFIGURATION
+            _serverPort = Config.Bind("General",
+                                      "ServerPort",
+                                      4444,
+                                      "The port the HTTP server listens on.");
+
+            Logger.LogInfo($"Real Life Loot Mod Started! Listening on Port: {_serverPort.Value}");
+
             _serverThread = new Thread(StartServer);
             _serverThread.Start();
         }
 
         void Update()
         {
-            // Run queued actions on the main game thread
+            // 2. CHECK FOR DUMP (Runs once when ObjectDB is ready)
+            if (!_hasDumped && ObjectDB.instance != null && ObjectDB.instance.m_items.Count > 0)
+            {
+                DumpItemDatabase();
+                _hasDumped = true;
+            }
+
+            // 3. PROCESS QUEUE (Server actions)
             while (_mainThreadQueue.TryDequeue(out var action))
             {
                 action.Invoke();
@@ -43,12 +65,12 @@ namespace RealLifeLootMod
         private void StartServer()
         {
             _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://*:{PORT}/");
+            _listener.Prefixes.Add($"http://*:{_serverPort.Value}/");
 
             try
             {
                 _listener.Start();
-                Logger.LogInfo($"Listening on port {PORT}...");
+                Logger.LogInfo($"Server started on port {_serverPort.Value}...");
             }
             catch (Exception e)
             {
@@ -94,22 +116,80 @@ namespace RealLifeLootMod
 
         private void SpawnItem(string prefabName, int amount)
         {
-            // CHECK 1: Is the Player object loaded?
             if (Player.m_localPlayer == null) return;
 
-            // CHECK 2: Does the item exist in the Game Database?
             GameObject prefab = ObjectDB.instance.GetItemPrefab(prefabName);
             if (prefab == null)
             {
-                Player.m_localPlayer.Message(MessageHud.MessageType.Center, $"Unknown Item: {prefabName}");
+                Player.m_localPlayer.Message(MessageHud.MessageType.Center, $"<color=red>Unknown Item:</color> {prefabName}");
                 return;
             }
 
-            // CHECK 3: Add to inventory
+            // Smart Spawning: Inventory or Ground
             if (Player.m_localPlayer.m_inventory.AddItem(prefab, amount))
             {
-                Player.m_localPlayer.Message(MessageHud.MessageType.TopLeft, $"Received {amount} {prefabName}");
+                Player.m_localPlayer.Message(MessageHud.MessageType.TopLeft, $"Received {amount}x {prefabName}");
+            }
+            else
+            {
+                Vector3 spawnPos = Player.m_localPlayer.transform.position +
+                                   (Player.m_localPlayer.transform.forward * 2f) +
+                                   Vector3.up;
+
+                UnityEngine.Object.Instantiate(prefab, spawnPos, Quaternion.identity);
+                Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Inventory Full! Item dropped.");
             }
         }
+
+        // 4. THE DUMP LOGIC
+        private void DumpItemDatabase()
+        {
+            Logger.LogInfo("Dumping item database...");
+            var exportList = new List<ItemExport>();
+
+            foreach (GameObject itemPrefab in ObjectDB.instance.m_items)
+            {
+                var itemDrop = itemPrefab.GetComponent<ItemDrop>();
+                if (itemDrop != null)
+                {
+                    // Clean up the name (handles localization if loaded)
+                    string rawName = itemDrop.m_itemData.m_shared.m_name;
+                    string localizedName = Localization.instance.Localize(rawName);
+
+                    exportList.Add(new ItemExport
+                    {
+                        name = localizedName,
+                        prefab = itemPrefab.name,
+                        category = itemDrop.m_itemData.m_shared.m_itemType.ToString()
+                    });
+                }
+            }
+
+            // Simple JSON creation to avoid extra dependencies
+            var jsonLines = exportList.Select(i =>
+                $"\t{{ \"name\": \"{i.name}\", \"prefab\": \"{i.prefab}\", \"category\": \"{i.category}\" }}");
+
+            string json = "[\n" + string.Join(",\n", jsonLines.ToArray()) + "\n]";
+
+            string path = Path.Combine(Paths.ConfigPath, "valheim_items.json");
+            File.WriteAllText(path, json);
+
+            Logger.LogInfo($"Database dumped to: {path}");
+
+            // Notify the player (in case they are already spawned in)
+            if (Player.m_localPlayer != null)
+            {
+                Player.m_localPlayer.Message(MessageHud.MessageType.Center, "Item Database Dumped!");
+            }
+        }
+    }
+
+    // 5. HELPER CLASS FOR JSON
+    [Serializable]
+    public class ItemExport
+    {
+        public string name;      // The human readable name (e.g., "Wood")
+        public string prefab;    // The code name (e.g., "Wood")
+        public string category;  // Weapon, Material, Consumable, etc.
     }
 }
